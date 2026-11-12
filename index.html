@@ -665,26 +665,31 @@ html, body {
 .map-popup {
   position: absolute;
   z-index: 700;
-  width: 256px;
+  width: max-content;
+  max-width: min(220px, calc(100vw - 32px));
   background: var(--popup-bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.22);
-  font-size: 12.5px;
-  line-height: 1.45;
+  border-radius: 999px;
+  padding: 5px 11px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 700;
+  text-align: center;
   display: none;
-  transform: translate(-50%, calc(-100% - 18px));
+  transform: translate(-50%, calc(-100% - 12px));
+  pointer-events: none;
+  white-space: normal;
 }
 .map-popup::after {
   content: "";
   position: absolute;
-  bottom: -6px;
+  bottom: -5px;
   left: 50%;
-  margin-left: -6px;
-  width: 10px;
-  height: 10px;
+  margin-left: -5px;
+  width: 8px;
+  height: 8px;
   background: var(--popup-bg);
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -1433,43 +1438,18 @@ function renderLabels() {
 function positionPopup(pin) {
   const pos = latLngToContainer(pin.lat, pin.lng);
   const s = mapSize();
-  const clampedX = Math.max(136, Math.min(s.w - 136, pos.x));
+  const halfWidth = Math.min((popupEl.offsetWidth || 150) / 2 + 8, s.w / 2);
+  const clampedX = Math.max(halfWidth, Math.min(s.w - halfWidth, pos.x));
   popupEl.style.left = clampedX.toFixed(1) + "px";
-  popupEl.style.top = Math.max(125, pos.y).toFixed(1) + "px";
+  popupEl.style.top = Math.max(38, pos.y).toFixed(1) + "px";
 }
 
 function openPinPopup(pin) {
   state.activePopupPin = pin;
-
-  const staySuffix = (pin.kind === "stay" && pin.stayText) ? " · " + escapeHtml(pin.stayText) : "";
-  const dateHeader = pin.dates.join(", ") + staySuffix;
-
-  let badgeHtml = "";
-  if (pin.opt) {
-    badgeHtml = '<span class="badge badge-opt">선택</span>';
-  } else if (pin.status === "booked") {
-    badgeHtml = '<span class="badge badge-booked">예약 완료</span>';
-  } else if (pin.status === "needed") {
-    badgeHtml = '<span class="badge badge-needed">예약 필요</span>';
-  }
-
-  const searchUrl = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(pin.en);
-  const approxHtml = pin.approx ? '<span class="popup-approx">· 위치 대략</span>' : "";
-
-  popupEl.innerHTML =
-    '<button type="button" class="popup-close" aria-label="닫기">×</button>' +
-    '<div class="popup-dates mono">' + dateHeader + '</div>' +
-    '<div class="popup-title-row"><span class="popup-name">' + escapeHtml(pin.name) + '</span>' + badgeHtml + '</div>' +
-    '<div class="popup-note">' + escapeHtml(pin.note) + '</div>' +
-    '<div class="popup-footer"><a class="popup-gmaps" href="' + searchUrl +
-    '" target="_blank" rel="noopener noreferrer">구글 지도에서 보기 ↗</a>' + approxHtml + '</div>';
-
-  popupEl.querySelector(".popup-close").addEventListener("click", e => {
-    e.stopPropagation();
-    closePopup();
-  });
-
+  // Compact callout: show the place name only.
+  popupEl.textContent = pin.name;
   popupEl.style.display = "block";
+  positionPopup(pin);
   renderPins();
 }
 
@@ -1486,22 +1466,54 @@ function renderMap() {
   renderPins();
 }
 
-// Pan & zoom
+// Pan & zoom: single-finger drag and two-finger pinch zoom on touch screens.
 let isDragging = false;
 let dragStartX = 0;
 let dragStartY = 0;
 let dragStartCenterWorld = null;
+const activeMapPointers = new Map();
+let pinchStartDistance = 0;
+let pinchStartZoom = state.zoom;
+
+function pointerDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
 
 mapEl.addEventListener("pointerdown", e => {
   if (e.target.closest(".map-pin, .map-popup, .btn-reset-view, .map-zoom-controls")) return;
+  activeMapPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  try { mapEl.setPointerCapture(e.pointerId); } catch (err) {}
+
+  if (activeMapPointers.size >= 2) {
+    const pts = Array.from(activeMapPointers.values());
+    pinchStartDistance = Math.max(1, pointerDistance(pts[0], pts[1]));
+    pinchStartZoom = state.zoom;
+    isDragging = false;
+    return;
+  }
+
   isDragging = true;
   dragStartX = e.clientX;
   dragStartY = e.clientY;
   dragStartCenterWorld = latLngToWorld(state.centerLat, state.centerLng, state.zoom);
-  mapEl.setPointerCapture(e.pointerId);
 });
 
 mapEl.addEventListener("pointermove", e => {
+  if (!activeMapPointers.has(e.pointerId)) return;
+  activeMapPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (activeMapPointers.size >= 2) {
+    const pts = Array.from(activeMapPointers.values());
+    const distance = Math.max(1, pointerDistance(pts[0], pts[1]));
+    const zoomDelta = Math.log2(distance / pinchStartDistance);
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pinchStartZoom + zoomDelta));
+    if (Math.abs(nextZoom - state.zoom) > 0.015) {
+      state.zoom = nextZoom;
+      renderMap();
+    }
+    return;
+  }
+
   if (!isDragging) return;
   const dx = e.clientX - dragStartX;
   const dy = e.clientY - dragStartY;
@@ -1511,14 +1523,31 @@ mapEl.addEventListener("pointermove", e => {
   renderMap();
 });
 
-mapEl.addEventListener("pointerup", e => {
-  if (isDragging) {
-    isDragging = false;
-    if (Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < 4) {
+function finishMapPointer(e) {
+  const wasPinching = activeMapPointers.size >= 2;
+  const wasDragging = isDragging;
+  activeMapPointers.delete(e.pointerId);
+
+  if (activeMapPointers.size === 0) {
+    if (wasDragging && !wasPinching &&
+        Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < 4) {
       closePopup();
     }
+    isDragging = false;
+    pinchStartDistance = 0;
+    return;
   }
-});
+
+  // Rebase the remaining finger after a pinch so it can continue panning.
+  const remaining = Array.from(activeMapPointers.values())[0];
+  isDragging = true;
+  dragStartX = remaining.x;
+  dragStartY = remaining.y;
+  dragStartCenterWorld = latLngToWorld(state.centerLat, state.centerLng, state.zoom);
+}
+mapEl.addEventListener("pointerup", finishMapPointer);
+mapEl.addEventListener("pointercancel", finishMapPointer);
+mapEl.addEventListener("lostpointercapture", finishMapPointer);
 
 mapEl.addEventListener("wheel", e => {
   e.preventDefault();
@@ -1748,6 +1777,10 @@ cardsList.addEventListener("click", e => {
   const placeEl = e.target.closest(".place-item");
   if (placeEl) {
     if (collapsed) setCollapsed(false, true);
+    const placeDayId = placeEl.dataset.dayId;
+    if (state.selectedDayId !== placeDayId) {
+      selectDay(placeDayId, false);
+    }
     clearPlaceHighlight();
     placeEl.classList.add("selected-place");
 
